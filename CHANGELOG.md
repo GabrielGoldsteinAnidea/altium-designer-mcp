@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   READMEs now say. A release builds it on a pinned Ubuntu 24.04 rather than whatever
   `ubuntu-latest` is, and both the release workflow and the draft review check the binary
   against the floor, so a newer build image can't quietly drop older distributions.
+- **Building from source needs Rust 1.89 or newer**, up from 1.88: uuid 1.27, which generates
+  the 3D-model identifiers, requires it. The prebuilt binaries are unaffected.
 
 ### Fixed
 
