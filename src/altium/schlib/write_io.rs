@@ -119,12 +119,67 @@ impl SchLib {
             }
         }
 
+        self.write_aliases(&mut cfb, &symbols, &ole_names)?;
+
         // Root Storage stream (Altium's icon storage).
         crate::altium::write_stream(&mut cfb, "/Storage", &Self::storage_stream(&symbols)?)?;
 
         cfb.flush()
             .map_err(|e| AltiumError::invalid_ole(format!("Failed to flush OLE file: {e}")))?;
 
+        Ok(())
+    }
+
+    /// Writes the storages that hold no symbol (`SchLib::aliases`) back as
+    /// read. An alias whose symbol is gone is dropped rather than left
+    /// pointing at nothing, one whose storage a symbol now takes yields to
+    /// it, and one whose symbol moved storage (renamed) names the new one.
+    fn write_aliases<F: Read + Write + Seek>(
+        &self,
+        cfb: &mut cfb::CompoundFile<F>,
+        symbols: &[&Symbol],
+        ole_names: &[String],
+    ) -> AltiumResult<()> {
+        for alias in &self.aliases {
+            if ole_names
+                .iter()
+                .any(|ole| crate::altium::same_name(ole, &alias.storage))
+            {
+                tracing::warn!(alias = %alias.storage, "a symbol now takes the alias's storage; alias dropped");
+                continue;
+            }
+            let section = match (&alias.target, &alias.section_name) {
+                (Some(target), _) => {
+                    let Some(i) = symbols
+                        .iter()
+                        .position(|s| crate::altium::same_name(&s.name, target))
+                    else {
+                        tracing::warn!(alias = %alias.storage, "the alias's symbol is gone; alias dropped");
+                        continue;
+                    };
+                    Some(ole_names[i].as_str())
+                }
+                (None, _) => None,
+            };
+            crate::altium::create_storage(cfb, &format!("/{}", alias.storage))?;
+            for (name, bytes) in &alias.streams {
+                let path = format!("/{}/{name}", alias.storage);
+                match section {
+                    Some(section)
+                        if name == "Redirection"
+                            && alias.section_name.as_deref() != Some(section) =>
+                    {
+                        let mut stream = Vec::new();
+                        crate::altium::framing::write_cstring_param_block(
+                            &mut stream,
+                            &crate::altium::encode_windows1252(&format!("|SectionName={section}")),
+                        );
+                        crate::altium::write_stream(cfb, &path, &stream)?;
+                    }
+                    _ => crate::altium::write_stream(cfb, &path, bytes)?,
+                }
+            }
+        }
         Ok(())
     }
 

@@ -410,7 +410,6 @@ impl McpServer {
     pub(crate) fn validate_pcblib(filepath: &str) -> ToolCallResult {
         use crate::altium::pcblib::MAX_REPORTED_PAD_OVERLAPS;
         use crate::altium::PcbLib;
-        use std::collections::HashSet;
 
         // Read the library
         let library = match PcbLib::open(filepath) {
@@ -462,36 +461,8 @@ impl McpServer {
                 }));
             }
 
-            // Check for duplicate pad designators
-            let mut seen_designators: HashSet<&str> = HashSet::new();
-            for pad in &fp.pads {
-                if !seen_designators.insert(&pad.designator) {
-                    issues.push(json!({
-                        "severity": "error",
-                        "component": name,
-                        "issue": format!("Duplicate pad designator: '{}'", pad.designator)
-                    }));
-                }
-
-                // Check for empty designator
-                if pad.designator.is_empty() {
-                    issues.push(json!({
-                        "severity": "error",
-                        "component": name,
-                        "issue": "Pad has empty designator"
-                    }));
-                }
-
-                // Check for zero or negative dimensions
-                if pad.width <= 0.0 || pad.height <= 0.0 {
-                    issues.push(json!({
-                        "severity": "error",
-                        "component": name,
-                        "issue": format!("Pad '{}' has invalid dimensions (width: {}, height: {})",
-                            pad.designator, pad.width, pad.height)
-                    }));
-                }
-            }
+            // Check pad designators and sizes (see `pad_issues`).
+            pad_issues(&mut issues, name, &fp.pads, true);
 
             // Check tracks for invalid values
             for (i, track) in fp.tracks.iter().enumerate() {
@@ -663,10 +634,16 @@ impl McpServer {
                 }));
             }
 
-            // Check for duplicate pin designators
-            let mut seen_designators: HashSet<&str> = HashSet::new();
+            // Check for duplicate pin designators. A pin drawn again in an
+            // alternate display mode (or another part) is the same pin, not a
+            // duplicate: only a repeat within one part's one mode is.
+            let mut seen_designators: HashSet<(i32, i32, &str)> = HashSet::new();
             for pin in &symbol.pins {
-                if !seen_designators.insert(&pin.designator) {
+                if !seen_designators.insert((
+                    pin.owner_part_id,
+                    pin.owner_part_display_mode,
+                    pin.designator.as_str(),
+                )) {
                     issues.push(json!({
                         "severity": "error",
                         "component": name,
@@ -739,7 +716,6 @@ impl McpServer {
     /// Returns `None` if the file cannot be read (which would indicate a serious write failure).
     pub(crate) fn post_write_validation_pcblib(filepath: &str) -> Option<Value> {
         use crate::altium::PcbLib;
-        use std::collections::HashSet;
 
         let library = PcbLib::open(filepath).ok()?;
         let mut issues: Vec<Value> = Vec::new();
@@ -759,26 +735,8 @@ impl McpServer {
             // The Altium 365 importer refuses an over-length description.
             push_over_length_description(&mut issues, name, &fp.description);
 
-            // Check for duplicate pad designators
-            let mut seen_designators: HashSet<&str> = HashSet::new();
-            for pad in &fp.pads {
-                if !seen_designators.insert(&pad.designator) {
-                    issues.push(json!({
-                        "severity": "error",
-                        "component": name,
-                        "issue": format!("Duplicate pad designator: '{}'", pad.designator)
-                    }));
-                }
-
-                // Check for zero or negative dimensions
-                if pad.width <= 0.0 || pad.height <= 0.0 {
-                    issues.push(json!({
-                        "severity": "error",
-                        "component": name,
-                        "issue": format!("Pad '{}' has invalid dimensions", pad.designator)
-                    }));
-                }
-            }
+            // Check pad designators and sizes (see `pad_issues`).
+            pad_issues(&mut issues, name, &fp.pads, false);
 
             // Check tracks for invalid values
             for (i, track) in fp.tracks.iter().enumerate() {
@@ -881,10 +839,16 @@ impl McpServer {
             push_over_length_description(&mut issues, name, &symbol.description);
             push_over_length_link_descriptions(&mut issues, name, &symbol.footprints);
 
-            // Check for duplicate pin designators
-            let mut seen_designators: HashSet<&str> = HashSet::new();
+            // Check for duplicate pin designators. A pin drawn again in an
+            // alternate display mode (or another part) is the same pin, not a
+            // duplicate: only a repeat within one part's one mode is.
+            let mut seen_designators: HashSet<(i32, i32, &str)> = HashSet::new();
             for pin in &symbol.pins {
-                if !seen_designators.insert(&pin.designator) {
+                if !seen_designators.insert((
+                    pin.owner_part_id,
+                    pin.owner_part_display_mode,
+                    pin.designator.as_str(),
+                )) {
                     issues.push(json!({
                         "severity": "error",
                         "component": name,
@@ -1626,6 +1590,63 @@ impl McpServer {
     }
 }
 
+/// The pad checks both validation passes share.
+///
+/// Altium-authored footprints use what a stricter rule would call errors:
+/// several pads sharing one designator are one electrical pin (a split
+/// thermal pad, a module's ground pads), a pad with no designator is a
+/// fiducial, a paste aperture or an unplated mounting hole, and a hole-only
+/// pad has no copper (0 x 0). Those are warnings to check, not errors; a
+/// negative size, or a zero-size pad with no hole, is still an error.
+/// `report_empty` adds the empty-designator warning (`validate_library`).
+fn pad_issues(
+    issues: &mut Vec<Value>,
+    name: &str,
+    pads: &[crate::altium::pcblib::Pad],
+    report_empty: bool,
+) {
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut repeated: Vec<&str> = Vec::new();
+    for pad in pads {
+        if pad.designator.is_empty() {
+            if report_empty {
+                issues.push(json!({
+                    "severity": "warning",
+                    "component": name,
+                    "issue": "Pad has empty designator (a fiducial, paste aperture or mounting hole has none; anything else needs one)"
+                }));
+            }
+        } else if !seen.insert(&pad.designator) && !repeated.contains(&pad.designator.as_str()) {
+            repeated.push(&pad.designator);
+            issues.push(json!({
+                "severity": "warning",
+                "component": name,
+                "issue": format!(
+                    "Pads share designator '{}' (Altium connects them as one pin, e.g. a split thermal pad; check it is intended)",
+                    pad.designator
+                )
+            }));
+        }
+        let hole = pad.hole_size.is_some_and(|h| h > 0.0);
+        if pad.width < 0.0 || pad.height < 0.0 || ((pad.width == 0.0 || pad.height == 0.0) && !hole)
+        {
+            let issue = if report_empty {
+                format!(
+                    "Pad '{}' has invalid dimensions (width: {}, height: {})",
+                    pad.designator, pad.width, pad.height
+                )
+            } else {
+                format!("Pad '{}' has invalid dimensions", pad.designator)
+            };
+            issues.push(json!({
+                "severity": "error",
+                "component": name,
+                "issue": issue
+            }));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -1841,6 +1862,29 @@ mod tests {
             .unwrap()
             .iter()
             .any(|i| i["issue"].as_str().unwrap().contains("does not contain")));
+    }
+
+    #[test]
+    fn validate_library_schlib_takes_a_pin_redrawn_in_another_display_mode() {
+        // An alternate display mode draws every pin again under its own
+        // designator: that is the same pin, not a duplicate.
+        let dir = test_temp_dir();
+        let server = create_test_server(dir.path());
+        let mut lib = SchLib::new();
+        let mut sym = Symbol::new("TWO_VIEWS");
+        sym.display_mode_count = 2;
+        sym.add_rectangle(crate::altium::schlib::Rectangle::new(-10, -10, 10, 10));
+        sym.add_pin(Pin::new("A", "1", -20, 0, 10, PinOrientation::Left));
+        let mut alternate = Pin::new("A", "1", 20, 0, 10, PinOrientation::Right);
+        alternate.owner_part_display_mode = 1;
+        sym.add_pin(alternate);
+        lib.add(sym);
+        let path = dir.path().join("Views.SchLib");
+        lib.save(&path).unwrap();
+        let parsed = parse_result_json(&server.call_validate_library(&json!({
+            "filepath": path.to_string_lossy(),
+        })));
+        assert_eq!(parsed["error_count"], 0, "{parsed}");
     }
 
     #[test]
@@ -2550,17 +2594,39 @@ mod tests {
             );
             assert_eq!(parsed["status"], "invalid");
             let issues = parsed["issues"].as_array().unwrap();
-            assert!(issues
-                .iter()
-                .any(|i| i["issue"] == "Duplicate pad designator: '1'"));
-            assert!(issues
-                .iter()
-                .any(|i| i["issue"] == "Pad has empty designator"));
-            assert!(issues.iter().any(|i| i["issue"]
-                .as_str()
-                .unwrap_or("")
-                .contains("invalid dimensions")));
-            assert!(parsed["error_count"].as_u64().unwrap() >= 3);
+            let has = |severity: &str, text: &str| {
+                issues.iter().any(|i| {
+                    i["severity"] == severity && i["issue"].as_str().unwrap_or("").contains(text)
+                })
+            };
+            // Shared and empty designators are Altium's own (split thermal
+            // pads; fiducials, paste apertures, mounting holes): warnings.
+            assert!(has("warning", "share designator '1'"));
+            assert!(has("warning", "Pad has empty designator"));
+            // A zero-width pad with no hole is still an error.
+            assert!(has("error", "invalid dimensions"));
+            assert_eq!(parsed["error_count"].as_u64().unwrap(), 1);
+        }
+
+        #[test]
+        fn validate_pcblib_takes_a_hole_only_pad() {
+            // An unplated mounting hole has no copper: Altium stores it 0 x 0.
+            let dir = test_temp_dir();
+            let server = create_test_server(dir.path());
+            let mut lib = PcbLib::new();
+            let mut fp = Footprint::new("HOLE");
+            let mut hole = Pad::through_hole("MNT1", 0.0, 0.0, 1.0, 1.0, 0.99);
+            hole.width = 0.0;
+            hole.height = 0.0;
+            hole.is_plated = false;
+            fp.add_pad(hole);
+            lib.add(fp);
+            let path = dir.path().join("Hole.PcbLib");
+            lib.save(&path).unwrap();
+            let parsed = parse_result_json(
+                &server.call_validate_library(&json!({ "filepath": path.to_string_lossy() })),
+            );
+            assert_eq!(parsed["error_count"], 0, "{parsed}");
         }
 
         #[test]
@@ -2735,8 +2801,19 @@ mod tests {
                 "component_names": ["GOOD"],
             })));
             assert_eq!(parsed["status"], "success");
-            assert_eq!(parsed["validation"]["status"], "invalid");
-            assert!(parsed["validation"]["error_count"].as_u64().unwrap() >= 1);
+            // Pads sharing a designator are one pin to Altium — a split
+            // thermal pad is authored that way — so the post-write check
+            // reports them to be looked at, not as an error.
+            assert_eq!(parsed["validation"]["status"], "warnings");
+            assert!(parsed["validation"]["issues"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|i| i["severity"] == "warning"
+                    && i["issue"]
+                        .as_str()
+                        .unwrap_or("")
+                        .contains("share designator '1'")));
         }
     }
     /// `validate_symbol_json` gates every graphic primitive `write_schlib`

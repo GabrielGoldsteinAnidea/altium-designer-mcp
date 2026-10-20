@@ -124,6 +124,7 @@ pub(super) fn parse_binary_pin(data: &[u8]) -> Option<Pin> {
         symbol_line_width: 0,
         frac: None,
         name_code_page: None,
+        owned_records: Vec::new(),
     })
 }
 
@@ -747,6 +748,24 @@ pub(super) fn parse_bezier(props: &HashMap<String, String>) -> Option<Bezier> {
     let y3 = crate::altium::schlib::coord::read(props, "y3");
     let x4 = crate::altium::schlib::coord::read(props, "x4");
     let y4 = crate::altium::schlib::coord::read(props, "y4");
+    // Any point past the fourth the record counts. The count is held to the
+    // keys the record actually carries, so a crafted LocationCount cannot
+    // size the list.
+    let count = props
+        .get("locationcount")
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .unwrap_or(4);
+    let extra_points: Vec<(f64, f64)> = (5..=count)
+        .take_while(|i| {
+            props.contains_key(&format!("x{i}")) || props.contains_key(&format!("y{i}"))
+        })
+        .map(|i| {
+            (
+                crate::altium::schlib::coord::read(props, &format!("x{i}")),
+                crate::altium::schlib::coord::read(props, &format!("y{i}")),
+            )
+        })
+        .collect();
 
     let line_width = props
         .get("linewidth")
@@ -771,6 +790,7 @@ pub(super) fn parse_bezier(props: &HashMap<String, String>) -> Option<Bezier> {
         y3,
         x4,
         y4,
+        extra_points,
         line_width,
         color,
         is_not_accessible,
