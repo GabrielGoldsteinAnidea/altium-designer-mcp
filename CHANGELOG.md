@@ -88,7 +88,13 @@ rename and back but for its save path, date and time.
   blank (whitespace) designator and a zero-size pad with no hole are still refused.
 - **`validate_library` no longer calls Altium's own footprints and symbols invalid.** Pads
   sharing a designator (a split thermal pad) and a pad with no designator are warnings; a
-  hole-only pad is valid; a pin drawn again in an alternate display mode is not a duplicate.
+  hole-only pad is valid; a pin drawn again in an alternate display mode is not a duplicate,
+  and a designator used in two parts of a multi-part symbol (a power pin in every part) is a
+  warning rather than an error.
+- **A carried stream never replaces one the writer builds.** A footprint's `carried_streams`
+  and a symbol's `extra_streams` that name a built stream (`Data`, say) or a malformed path
+  are skipped with a warning, and a carried stream nested in a sub-storage, or beside a
+  storage the writer already made, no longer fails the save.
 
 ## [1.2.2] - 2026-10-09
 

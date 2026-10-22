@@ -2611,6 +2611,35 @@ mod tests {
     }
 
     #[test]
+    fn a_carried_stream_never_replaces_a_built_one() {
+        // `extra_streams` arrive from a client too: one naming a stream the
+        // writer builds, or a path rather than a name, is skipped.
+        let mut symbol = Symbol::new("U1");
+        symbol.add_pin(Pin::new("1", "A", -10, 0, 10, PinOrientation::Right));
+        symbol.extra_streams = vec![
+            ("Data".to_string(), b"not a Data stream".to_vec()),
+            ("../FileHeader".to_string(), b"outside".to_vec()),
+            (String::new(), b"nameless".to_vec()),
+        ];
+        let mut lib = SchLib::new();
+        lib.add(symbol);
+        let mut buffer = Cursor::new(Vec::new());
+        lib.write(&mut buffer).expect("write");
+
+        let mut cfb = cfb::CompoundFile::open(Cursor::new(buffer.get_ref().clone())).expect("cfb");
+        for path in ["/U1/Data", "/FileHeader"] {
+            let mut data = Vec::new();
+            std::io::Read::read_to_end(&mut cfb.open_stream(path).expect(path), &mut data)
+                .expect("read");
+            assert!(data.windows(7).all(|w| w != b"outside"), "{path}");
+            assert!(data.windows(6).all(|w| w != b"not a "), "{path}");
+        }
+        buffer.set_position(0);
+        let back = SchLib::read(buffer).expect("the library still reads");
+        assert_eq!(back.get("U1").expect("U1").pins.len(), 1);
+    }
+
+    #[test]
     fn removing_a_parameter_leaves_the_other_records_where_they_were() {
         // Interleaved as a file might store it: A, pin 1, B, pin 2. Removing
         // A must not move B in front of pin 1, which is what a bare

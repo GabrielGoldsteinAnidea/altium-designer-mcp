@@ -1505,8 +1505,6 @@ impl McpServer {
             Ok(guid) => guid,
             Err(e) => return Err(ToolCallResult::error(e)),
         };
-        // The storage the footprint was read from, so a read-modify-write
-        // through JSON keeps it where Altium looks for it (#507).
         // The streams this crate does not read, carried verbatim with the
         // primitive sequence they name primitives in.
         {
@@ -1525,6 +1523,8 @@ impl McpServer {
                 .and_then(|v| serde_json::from_value(v).ok())
                 .unwrap_or_default();
         }
+        // The storage the footprint was read from, so a read-modify-write
+        // through JSON keeps it where Altium looks for it (#507).
         footprint.storage_name = fp_json
             .get("storage_name")
             .and_then(serde_json::Value::as_str)

@@ -710,9 +710,10 @@ fn encode_pad_size_shape_block(pad: &Pad) -> Vec<u8> {
     b.push(full_shape_id); // 640: flag4 = full pad shape id (9 for rounded-rect)
     write_i32(&mut b, w); // 641-644: entry size X
     write_i32(&mut b, h); // 645-648: entry size Y
-                          // 649: the entry's corner radius %: the pad's own radius, or 50 when it
-                          // has none — the goldens' 0 and 50 pads both store 50, and every one of
-                          // 216 rounded pads in an Altium 365-exported library stores its radius.
+
+    // 649: the entry's corner radius %: the pad's own radius, or 50 when it
+    // has none — the goldens' 0 and 50 pads both store 50, and every one of
+    // 216 rounded pads in an Altium 365-exported library stores its radius.
     b.push(if radius > 0 { radius } else { 50 });
     b.push(0); // 650: trailing
     debug_assert_eq!(b.len(), 651);

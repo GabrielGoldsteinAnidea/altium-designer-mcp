@@ -135,8 +135,8 @@ pub struct Pin {
     /// pin's stream-index — each as its `(key, value)` segments in stored
     /// order. They follow the pin in the stream, take no `IndexInSheet`
     /// slot, and go back verbatim after it with `OwnerIndex` set to the
-    /// pin's new stream-index. Read as symbol parameters, they lost their
-    /// owner and became component parameters.
+    /// pin's new stream-index. They belong to the pin, never to the
+    /// symbol's own parameters.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub owned_records: Vec<Vec<(String, String)>>,
 }

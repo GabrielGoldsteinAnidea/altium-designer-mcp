@@ -856,13 +856,27 @@ impl PcbLib {
         // primitives they name are where they were.
         if !footprint.carried_streams.is_empty() {
             if footprint.kind_sequence() == footprint.carried_streams_sequence {
-                let mut storages: Vec<String> = Vec::new();
                 for (path, bytes) in &footprint.carried_streams {
+                    // A path of plain names below the footprint, naming no
+                    // stream already written: a carried stream never stands
+                    // in for one this crate builds.
+                    let segments: Vec<&str> = path.split('/').collect();
                     let full = format!("{storage_path}/{path}");
-                    if let Some((parent, _)) = full.rsplit_once('/') {
-                        if parent != storage_path && !storages.iter().any(|s| s == parent) {
-                            crate::altium::create_storage(cfb, parent)?;
-                            storages.push(parent.to_string());
+                    if segments
+                        .iter()
+                        .any(|s| s.is_empty() || *s == "." || *s == "..")
+                        || cfb.exists(&full)
+                    {
+                        tracing::warn!(footprint = %footprint.name, stream = %path, "carried stream skipped");
+                        continue;
+                    }
+                    // Its storages, each made unless the writer or an earlier
+                    // carried stream already made it.
+                    let mut parent = storage_path.clone();
+                    for segment in &segments[..segments.len() - 1] {
+                        parent = format!("{parent}/{segment}");
+                        if !cfb.is_storage(&parent) {
+                            crate::altium::create_storage(cfb, &parent)?;
                         }
                     }
                     crate::altium::write_stream(cfb, &full, bytes)?;
@@ -957,6 +971,45 @@ mod tests {
             );
         }
         assert_eq!(PcbLib::open(&rewritten).expect("reread").names(), ["FP"]);
+    }
+
+    #[test]
+    fn carried_streams_make_their_storages_and_never_replace_a_built_stream() {
+        let dir = temp_dir();
+        let mut fp = Footprint::new("FP");
+        fp.add_pad(Pad::smd("1", 0.0, 0.0, 1.0, 1.0));
+        fp.carried_streams = vec![
+            ("A/B/Deep".to_string(), b"deep".to_vec()),
+            ("A/Beside".to_string(), b"beside".to_vec()),
+            ("Data".to_string(), b"not a Data stream".to_vec()),
+            ("../Escape".to_string(), b"outside".to_vec()),
+            ("A//Empty".to_string(), b"empty segment".to_vec()),
+        ];
+        fp.carried_streams_sequence = fp.kind_sequence();
+        let mut lib = PcbLib::new();
+        lib.add(fp);
+        let carried = dir.path().join("Carried.PcbLib");
+        lib.save(&carried)
+            .expect("a nested or shared storage is made once");
+
+        assert_eq!(
+            read_stream(&carried, "/FP/A/B/Deep").as_deref(),
+            Some(&b"deep"[..])
+        );
+        assert_eq!(
+            read_stream(&carried, "/FP/A/Beside").as_deref(),
+            Some(&b"beside"[..])
+        );
+        assert_ne!(
+            read_stream(&carried, "/FP/Data").as_deref(),
+            Some(&b"not a Data stream"[..]),
+            "the built Data stream stands"
+        );
+        assert!(read_stream(&carried, "/Escape").is_none());
+        assert!(read_stream(&carried, "/FP/Escape").is_none());
+        let back = PcbLib::open(&carried).expect("reread");
+        assert_eq!(back.names(), ["FP"]);
+        assert_eq!(back.get("FP").expect("FP").pads.len(), 1);
     }
 
     #[test]

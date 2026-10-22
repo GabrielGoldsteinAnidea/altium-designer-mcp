@@ -582,7 +582,6 @@ impl McpServer {
     /// Validates a `SchLib` file.
     pub(crate) fn validate_schlib(filepath: &str) -> ToolCallResult {
         use crate::altium::SchLib;
-        use std::collections::HashSet;
 
         // Read the library
         let library = match SchLib::open(filepath) {
@@ -634,23 +633,10 @@ impl McpServer {
                 }));
             }
 
-            // Check for duplicate pin designators. A pin drawn again in an
-            // alternate display mode (or another part) is the same pin, not a
-            // duplicate: only a repeat within one part's one mode is.
-            let mut seen_designators: HashSet<(i32, i32, &str)> = HashSet::new();
-            for pin in &symbol.pins {
-                if !seen_designators.insert((
-                    pin.owner_part_id,
-                    pin.owner_part_display_mode,
-                    pin.designator.as_str(),
-                )) {
-                    issues.push(json!({
-                        "severity": "error",
-                        "component": name,
-                        "issue": format!("Duplicate pin designator: '{}'", pin.designator)
-                    }));
-                }
+            // Check pin designators for repeats (see `pin_designator_issues`).
+            pin_designator_issues(&mut issues, name, &symbol.pins);
 
+            for pin in &symbol.pins {
                 // Check for empty designator
                 if pin.designator.is_empty() {
                     issues.push(json!({
@@ -818,7 +804,6 @@ impl McpServer {
     /// Returns `None` if the file cannot be read (which would indicate a serious write failure).
     pub(crate) fn post_write_validation_schlib(filepath: &str) -> Option<Value> {
         use crate::altium::SchLib;
-        use std::collections::HashSet;
 
         let library = SchLib::open(filepath).ok()?;
         let mut issues: Vec<Value> = Vec::new();
@@ -839,23 +824,8 @@ impl McpServer {
             push_over_length_description(&mut issues, name, &symbol.description);
             push_over_length_link_descriptions(&mut issues, name, &symbol.footprints);
 
-            // Check for duplicate pin designators. A pin drawn again in an
-            // alternate display mode (or another part) is the same pin, not a
-            // duplicate: only a repeat within one part's one mode is.
-            let mut seen_designators: HashSet<(i32, i32, &str)> = HashSet::new();
-            for pin in &symbol.pins {
-                if !seen_designators.insert((
-                    pin.owner_part_id,
-                    pin.owner_part_display_mode,
-                    pin.designator.as_str(),
-                )) {
-                    issues.push(json!({
-                        "severity": "error",
-                        "component": name,
-                        "issue": format!("Duplicate pin designator: '{}'", pin.designator)
-                    }));
-                }
-            }
+            // Check pin designators for repeats (see `pin_designator_issues`).
+            pin_designator_issues(&mut issues, name, &symbol.pins);
 
             // Check rectangles for inverted corners
             for (i, rect) in symbol.rectangles.iter().enumerate() {
@@ -1647,6 +1617,41 @@ fn pad_issues(
     }
 }
 
+/// The pin-designator checks both validation passes share.
+///
+/// A pin drawn again in an alternate display mode is the same pin, so only a
+/// repeat within one part's one mode is an error. A designator in two
+/// different parts of a multi-part symbol is a warning: Altium connects them
+/// as one pin, which suits a power pin repeated in every part and is a
+/// mistake anywhere else (two gates of a quad sharing pin 1), so it is
+/// reported once to be checked.
+fn pin_designator_issues(issues: &mut Vec<Value>, name: &str, pins: &[crate::altium::schlib::Pin]) {
+    let mut seen: std::collections::HashSet<(i32, i32, &str)> = std::collections::HashSet::new();
+    let mut first_part: std::collections::HashMap<&str, i32> = std::collections::HashMap::new();
+    let mut across_parts: Vec<&str> = Vec::new();
+    for pin in pins {
+        let designator = pin.designator.as_str();
+        if !seen.insert((pin.owner_part_id, pin.owner_part_display_mode, designator)) {
+            issues.push(json!({
+                "severity": "error",
+                "component": name,
+                "issue": format!("Duplicate pin designator: '{designator}'")
+            }));
+        }
+        let part = *first_part.entry(designator).or_insert(pin.owner_part_id);
+        if part != pin.owner_part_id && !across_parts.contains(&designator) {
+            across_parts.push(designator);
+            issues.push(json!({
+                "severity": "warning",
+                "component": name,
+                "issue": format!(
+                    "Pin designator '{designator}' is used in more than one part (Altium connects them as one pin, e.g. a power pin in every part; check it is intended)"
+                )
+            }));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -1885,6 +1890,51 @@ mod tests {
             "filepath": path.to_string_lossy(),
         })));
         assert_eq!(parsed["error_count"], 0, "{parsed}");
+    }
+
+    #[test]
+    fn validate_library_schlib_warns_of_a_designator_in_two_parts() {
+        // Two gates sharing pin 1 is a mistake; a power pin in every part is
+        // not. Either way it is reported once, to be checked.
+        let dir = test_temp_dir();
+        let server = create_test_server(dir.path());
+        let mut lib = SchLib::new();
+        let mut sym = Symbol::new("DUAL");
+        sym.part_count = 2;
+        sym.add_rectangle(crate::altium::schlib::Rectangle::new(-10, -10, 10, 10));
+        for part in [1, 2] {
+            let mut pin = Pin::new("A", "1", -20, 0, 10, PinOrientation::Left);
+            pin.owner_part_id = part;
+            sym.add_pin(pin);
+        }
+        let mut third = Pin::new("A", "1", 20, 0, 10, PinOrientation::Right);
+        third.owner_part_id = 2;
+        sym.add_pin(third);
+        lib.add(sym);
+        let path = dir.path().join("Dual.SchLib");
+        lib.save(&path).unwrap();
+        let parsed = parse_result_json(&server.call_validate_library(&json!({
+            "filepath": path.to_string_lossy(),
+        })));
+        let issues = parsed["issues"].as_array().unwrap();
+        let count = |severity: &str, text: &str| {
+            issues
+                .iter()
+                .filter(|i| {
+                    i["severity"] == severity && i["issue"].as_str().unwrap_or("").contains(text)
+                })
+                .count()
+        };
+        assert_eq!(
+            count("warning", "used in more than one part"),
+            1,
+            "{parsed}"
+        );
+        assert_eq!(
+            count("error", "Duplicate pin designator: '1'"),
+            1,
+            "a repeat within part 2: {parsed}"
+        );
     }
 
     #[test]

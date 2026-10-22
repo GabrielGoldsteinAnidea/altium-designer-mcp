@@ -113,9 +113,20 @@ impl SchLib {
             if let Some(wide) = pin_aux::encode_pin_wide_text(&symbol.pins)? {
                 crate::altium::write_stream(&mut cfb, &format!("/{ole_name}/PinWideText"), &wide)?;
             }
-            // Streams read but not understood go back as they were.
+            // Streams read but not understood go back as they were: each a
+            // plain name beside the symbol's own, never one already written.
             for (name, bytes) in &symbol.extra_streams {
-                crate::altium::write_stream(&mut cfb, &format!("/{ole_name}/{name}"), bytes)?;
+                let path = format!("/{ole_name}/{name}");
+                if name.is_empty()
+                    || name.contains('/')
+                    || name == "."
+                    || name == ".."
+                    || cfb.exists(&path)
+                {
+                    tracing::warn!(symbol = %symbol.name, stream = %name, "carried stream skipped");
+                    continue;
+                }
+                crate::altium::write_stream(&mut cfb, &path, bytes)?;
             }
         }
 
